@@ -24,7 +24,6 @@ def format_bytes(value):
     for unit in units:
         if value < 1024:
             return f"{value:.1f} {unit}"
-
         value /= 1024
 
     return f"{value:.1f} PB"
@@ -44,19 +43,18 @@ def format_duration(seconds):
     seconds = seconds % 60
 
     if hours:
-        return (
-            f"{hours:02d}:"
-            f"{minutes:02d}:"
-            f"{seconds:02d}"
-        )
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    return (
-        f"{minutes:02d}:"
-        f"{seconds:02d}"
-    )
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 def safe_filename(name):
+    """
+    Used only when a human-readable filename is needed.
+    Downloaded files themselves use video ID to avoid
+    'File name too long' errors.
+    """
+
     if not name:
         return "video"
 
@@ -180,6 +178,7 @@ def parse_ytdlp_error(error_text):
         "video unavailable",
         "this video isn't available",
         "this video is not available",
+        "has been removed",
     ]
 
     if any(
@@ -210,6 +209,10 @@ def parse_ytdlp_error(error_text):
             "This URL is not supported."
         )
 
+    # -----------------------------------------------------
+    # Generic error
+    # -----------------------------------------------------
+
     return DownloaderError(
         error_text.strip()
         or "Download failed."
@@ -222,7 +225,7 @@ def parse_ytdlp_error(error_text):
 
 async def get_video_info(url):
 
-    process = await asyncio.create_subprocess_exec(
+    command = [
         "yt-dlp",
 
         "--dump-single-json",
@@ -233,9 +236,21 @@ async def get_video_info(url):
 
         "--quiet",
 
-        "--no-check-certificates",
+        # Network reliability
+        "--socket-timeout",
+        "60",
+
+        "--retries",
+        "5",
+
+        # Prefer IPv4
+        "--force-ipv4",
 
         url,
+    ]
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
 
         stdout=asyncio.subprocess.PIPE,
 
@@ -304,7 +319,10 @@ def parse_progress(line, state):
                     / 100
                 )
 
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError
+        ):
 
             pass
 
@@ -367,6 +385,56 @@ def parse_progress(line, state):
             ):
 
                 pass
+
+    # -----------------------------------------------------
+    # Downloaded amount
+    # -----------------------------------------------------
+
+    downloaded_match = re.search(
+        r"\[download\]\s+([0-9.]+)([KMGTP]?i?)B",
+        line,
+        re.IGNORECASE
+    )
+
+    if downloaded_match:
+
+        try:
+
+            number = float(
+                downloaded_match.group(1)
+            )
+
+            unit = (
+                downloaded_match.group(2)
+                .upper()
+            )
+
+            multipliers = {
+                "": 1,
+                "K": 1024,
+                "KI": 1024,
+                "M": 1024 ** 2,
+                "MI": 1024 ** 2,
+                "G": 1024 ** 3,
+                "GI": 1024 ** 3,
+                "T": 1024 ** 4,
+                "TI": 1024 ** 4,
+            }
+
+            state.downloaded = (
+                number
+                * multipliers.get(
+                    unit,
+                    1
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            pass
 
     # -----------------------------------------------------
     # Speed
@@ -523,9 +591,20 @@ async def download_video(
         output_directory.iterdir()
     )
 
-    # IMPORTANT:
-    # Use video ID instead of title.
-    # This prevents "File name too long".
+    # =====================================================
+    # IMPORTANT
+    # =====================================================
+    #
+    # Do NOT use %(title)s here.
+    #
+    # Some Facebook/other titles can be extremely long
+    # and cause:
+    #
+    # [Errno 36] File name too long
+    #
+    # Video ID is short and safe.
+    # =====================================================
+
     output_template = str(
         output_directory
         / "%(id)s.%(ext)s"
@@ -534,38 +613,45 @@ async def download_video(
     command = [
         "yt-dlp",
 
-        # Progress output.
+        # Progress output
         "--newline",
 
-        # Don't download playlists.
+        # Never download playlist
         "--no-playlist",
 
-        # Retry.
+        # Network reliability
+        "--socket-timeout",
+        "60",
+
+        # Retry network failures
         "--retries",
         "10",
 
         "--fragment-retries",
         "10",
 
-        # Timeout.
-        "--socket-timeout",
-        "60",
+        "--retry-sleep",
+        "3",
 
-        # Continue partial download.
+        # Prefer IPv4
+        "--force-ipv4",
+
+        # Continue partial downloads
         "--continue",
 
-        # Don't overwrite completed files.
+        # Don't overwrite existing file
         "--no-overwrites",
 
-        # Best video + audio.
+        # Best available video + audio.
+        # Falls back to a single format if necessary.
         "-f",
         "bv*+ba/b",
 
-        # Merge video/audio.
+        # Merge separate streams to MP4
         "--merge-output-format",
         "mp4",
 
-        # Safe filename.
+        # Safe filename
         "-o",
         output_template,
 
@@ -687,7 +773,7 @@ async def download_video(
             raise parsed_error
 
         # -----------------------------------------------------
-        # Find downloaded file
+        # Find output
         # -----------------------------------------------------
 
         filepath = find_downloaded_file(
@@ -701,7 +787,7 @@ async def download_video(
 
             raise DownloaderError(
                 "Download completed but "
-                "the output file was not found."
+                "the output file could not be found."
             )
 
         state.filename = str(
@@ -751,7 +837,7 @@ async def download_video(
 
 
 # =========================================================
-# USER FRIENDLY ERROR
+# USER-FRIENDLY ERROR
 # =========================================================
 
 def user_friendly_error(error):
@@ -799,7 +885,9 @@ def user_friendly_error(error):
             "🛑 <b>Download cancelled.</b>"
         )
 
-    message = str(error).strip()
+    message = str(
+        error
+    ).strip()
 
     if not message:
 
@@ -807,12 +895,21 @@ def user_friendly_error(error):
             "The video could not be downloaded."
         )
 
+    # Prevent huge raw errors in Telegram.
     if len(message) > 800:
 
         message = (
             message[:800]
             + "..."
         )
+
+    # Escape HTML-sensitive characters
+    message = (
+        message
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
     return (
         "❌ <b>Download failed.</b>\n\n"
