@@ -19,9 +19,12 @@ def format_bytes(value):
     except (TypeError, ValueError):
         return "0 B"
 
-    for unit in ("B", "KB", "MB", "GB", "TB"):
+    units = ["B", "KB", "MB", "GB", "TB"]
+
+    for unit in units:
         if value < 1024:
             return f"{value:.1f} {unit}"
+
         value /= 1024
 
     return f"{value:.1f} PB"
@@ -41,9 +44,16 @@ def format_duration(seconds):
     seconds = seconds % 60
 
     if hours:
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return (
+            f"{hours:02d}:"
+            f"{minutes:02d}:"
+            f"{seconds:02d}"
+        )
 
-    return f"{minutes:02d}:{seconds:02d}"
+    return (
+        f"{minutes:02d}:"
+        f"{seconds:02d}"
+    )
 
 
 def safe_filename(name):
@@ -62,7 +72,7 @@ def safe_filename(name):
         name
     ).strip()
 
-    return name[:180] or "video"
+    return name[:100] or "video"
 
 
 # =========================================================
@@ -70,35 +80,31 @@ def safe_filename(name):
 # =========================================================
 
 class DownloaderError(Exception):
-    """Base downloader error."""
-
-
-class VideoNotAccessibleError(DownloaderError):
-    """Video cannot currently be accessed."""
+    pass
 
 
 class YouTubeVerificationError(
-    VideoNotAccessibleError
+    DownloaderError
 ):
-    """YouTube requires additional verification."""
+    pass
 
 
 class PrivateVideoError(
-    VideoNotAccessibleError
+    DownloaderError
 ):
-    """Video is private or unavailable."""
+    pass
 
 
 class UnsupportedVideoError(
-    VideoNotAccessibleError
+    DownloaderError
 ):
-    """Unsupported or invalid URL."""
+    pass
 
 
 class DownloadCancelledError(
     DownloaderError
 ):
-    """Download was cancelled."""
+    pass
 
 
 # =========================================================
@@ -133,10 +139,6 @@ class DownloadState:
 # =========================================================
 
 def parse_ytdlp_error(error_text):
-    """
-    Convert yt-dlp's raw error into a useful
-    application-level error.
-    """
 
     if not error_text:
         return DownloaderError(
@@ -149,7 +151,7 @@ def parse_ytdlp_error(error_text):
     # YouTube verification
     # -----------------------------------------------------
 
-    youtube_verification_patterns = [
+    youtube_patterns = [
         "sign in to confirm you're not a bot",
         "sign in to confirm you’re not a bot",
         "confirm you're not a bot",
@@ -160,12 +162,12 @@ def parse_ytdlp_error(error_text):
 
     if any(
         pattern in text
-        for pattern in youtube_verification_patterns
+        for pattern in youtube_patterns
     ):
 
         return YouTubeVerificationError(
-            "YouTube is requiring additional verification "
-            "for this request."
+            "YouTube is requiring additional "
+            "verification for this request."
         )
 
     # -----------------------------------------------------
@@ -205,12 +207,8 @@ def parse_ytdlp_error(error_text):
     ):
 
         return UnsupportedVideoError(
-            "This URL is not supported by the downloader."
+            "This URL is not supported."
         )
-
-    # -----------------------------------------------------
-    # Generic
-    # -----------------------------------------------------
 
     return DownloaderError(
         error_text.strip()
@@ -223,12 +221,6 @@ def parse_ytdlp_error(error_text):
 # =========================================================
 
 async def get_video_info(url):
-
-    """
-    Fetch metadata only.
-
-    This does not download the video.
-    """
 
     process = await asyncio.create_subprocess_exec(
         "yt-dlp",
@@ -313,10 +305,11 @@ def parse_progress(line, state):
                 )
 
         except (TypeError, ValueError):
+
             pass
 
     # -----------------------------------------------------
-    # Downloaded size
+    # Total size
     # -----------------------------------------------------
 
     size_match = re.search(
@@ -368,7 +361,11 @@ def parse_progress(line, state):
                     )
                 )
 
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError
+            ):
+
                 pass
 
     # -----------------------------------------------------
@@ -424,7 +421,11 @@ def parse_progress(line, state):
                     )
                 )
 
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError
+            ):
+
                 pass
 
     # -----------------------------------------------------
@@ -451,7 +452,11 @@ def parse_progress(line, state):
                 + seconds
             )
 
-        except (ValueError, TypeError):
+        except (
+            ValueError,
+            TypeError
+        ):
+
             pass
 
 
@@ -474,7 +479,6 @@ def find_downloaded_file(
         if p.is_file()
     ]
 
-    # Prefer newly created/modified files.
     new_files = [
         p
         for p in files
@@ -519,9 +523,12 @@ async def download_video(
         output_directory.iterdir()
     )
 
+    # IMPORTANT:
+    # Use video ID instead of title.
+    # This prevents "File name too long".
     output_template = str(
         output_directory
-        / "%(title)s.%(ext)s"
+        / "%(id)s.%(ext)s"
     )
 
     command = [
@@ -533,32 +540,32 @@ async def download_video(
         # Don't download playlists.
         "--no-playlist",
 
-        # Retry network failures.
+        # Retry.
         "--retries",
         "10",
 
         "--fragment-retries",
         "10",
 
-        # Network timeout.
+        # Timeout.
         "--socket-timeout",
         "60",
 
-        # Continue partial files.
+        # Continue partial download.
         "--continue",
 
         # Don't overwrite completed files.
         "--no-overwrites",
 
-        # Prefer best available video + audio.
+        # Best video + audio.
         "-f",
         "bv*+ba/b",
 
-        # Merge to MP4 where possible.
+        # Merge video/audio.
         "--merge-output-format",
         "mp4",
 
-        # Output filename.
+        # Safe filename.
         "-o",
         output_template,
 
@@ -617,6 +624,7 @@ async def download_video(
                     process.terminate()
 
                 except ProcessLookupError:
+
                     pass
 
                 try:
@@ -629,9 +637,11 @@ async def download_video(
                 except asyncio.TimeoutError:
 
                     try:
+
                         process.kill()
 
                     except ProcessLookupError:
+
                         pass
 
                 state.status = "cancelled"
@@ -677,7 +687,7 @@ async def download_video(
             raise parsed_error
 
         # -----------------------------------------------------
-        # Find output file
+        # Find downloaded file
         # -----------------------------------------------------
 
         filepath = find_downloaded_file(
@@ -691,7 +701,7 @@ async def download_video(
 
             raise DownloaderError(
                 "Download completed but "
-                "the output file could not be found."
+                "the output file was not found."
             )
 
         state.filename = str(
@@ -711,6 +721,7 @@ async def download_video(
             process.terminate()
 
         except ProcessLookupError:
+
             pass
 
         try:
@@ -723,9 +734,11 @@ async def download_video(
         except asyncio.TimeoutError:
 
             try:
+
                 process.kill()
 
             except ProcessLookupError:
+
                 pass
 
         state.status = "cancelled"
@@ -738,7 +751,7 @@ async def download_video(
 
 
 # =========================================================
-# USER-FRIENDLY ERROR MESSAGE
+# USER FRIENDLY ERROR
 # =========================================================
 
 def user_friendly_error(error):
@@ -763,7 +776,7 @@ def user_friendly_error(error):
         return (
             "❌ <b>Video unavailable.</b>\n\n"
             "The video may be private, removed, "
-            "age-restricted, or otherwise unavailable."
+            "or otherwise unavailable."
         )
 
     if isinstance(
