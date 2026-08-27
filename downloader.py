@@ -1,46 +1,59 @@
 import asyncio
 import json
-import os
 import re
-import subprocess
 from pathlib import Path
 
 from config import DOWNLOAD_DIR
 
 
+# =========================================================
+# HELPERS
+# =========================================================
+
 def format_bytes(value):
     if not value:
         return "0 B"
 
-    value = float(value)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "0 B"
 
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if value < 1024:
             return f"{value:.1f} {unit}"
-
         value /= 1024
 
     return f"{value:.1f} PB"
 
 
 def format_duration(seconds):
-    if not seconds:
+    if seconds is None:
         return "Unknown"
 
-    seconds = int(seconds)
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return "Unknown"
 
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
-    seconds %= 60
+    seconds = seconds % 60
 
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 def safe_filename(name):
+    if not name:
+        return "video"
+
     name = re.sub(
         r'[\\/*?:"<>|]',
         "_",
-        name
+        str(name)
     )
 
     name = re.sub(
@@ -51,6 +64,46 @@ def safe_filename(name):
 
     return name[:180] or "video"
 
+
+# =========================================================
+# ERROR TYPES
+# =========================================================
+
+class DownloaderError(Exception):
+    """Base downloader error."""
+
+
+class VideoNotAccessibleError(DownloaderError):
+    """Video cannot currently be accessed."""
+
+
+class YouTubeVerificationError(
+    VideoNotAccessibleError
+):
+    """YouTube requires additional verification."""
+
+
+class PrivateVideoError(
+    VideoNotAccessibleError
+):
+    """Video is private or unavailable."""
+
+
+class UnsupportedVideoError(
+    VideoNotAccessibleError
+):
+    """Unsupported or invalid URL."""
+
+
+class DownloadCancelledError(
+    DownloaderError
+):
+    """Download was cancelled."""
+
+
+# =========================================================
+# DOWNLOAD STATE
+# =========================================================
 
 class DownloadState:
 
@@ -75,21 +128,125 @@ class DownloadState:
         self.process = None
 
 
+# =========================================================
+# ERROR PARSER
+# =========================================================
+
+def parse_ytdlp_error(error_text):
+    """
+    Convert yt-dlp's raw error into a useful
+    application-level error.
+    """
+
+    if not error_text:
+        return DownloaderError(
+            "Unknown downloader error."
+        )
+
+    text = error_text.lower()
+
+    # -----------------------------------------------------
+    # YouTube verification
+    # -----------------------------------------------------
+
+    youtube_verification_patterns = [
+        "sign in to confirm you're not a bot",
+        "sign in to confirm you’re not a bot",
+        "confirm you're not a bot",
+        "confirm you’re not a bot",
+        "use --cookies-from-browser",
+        "use --cookies for the authentication",
+    ]
+
+    if any(
+        pattern in text
+        for pattern in youtube_verification_patterns
+    ):
+
+        return YouTubeVerificationError(
+            "YouTube is requiring additional verification "
+            "for this request."
+        )
+
+    # -----------------------------------------------------
+    # Private / unavailable
+    # -----------------------------------------------------
+
+    private_patterns = [
+        "this video is private",
+        "private video",
+        "video unavailable",
+        "this video isn't available",
+        "this video is not available",
+    ]
+
+    if any(
+        pattern in text
+        for pattern in private_patterns
+    ):
+
+        return PrivateVideoError(
+            "This video is private or unavailable."
+        )
+
+    # -----------------------------------------------------
+    # Unsupported URL
+    # -----------------------------------------------------
+
+    unsupported_patterns = [
+        "unsupported url",
+        "no suitable extractor",
+        "is not a valid url",
+    ]
+
+    if any(
+        pattern in text
+        for pattern in unsupported_patterns
+    ):
+
+        return UnsupportedVideoError(
+            "This URL is not supported by the downloader."
+        )
+
+    # -----------------------------------------------------
+    # Generic
+    # -----------------------------------------------------
+
+    return DownloaderError(
+        error_text.strip()
+        or "Download failed."
+    )
+
+
+# =========================================================
+# GET VIDEO INFO
+# =========================================================
+
 async def get_video_info(url):
 
     """
     Fetch metadata only.
-    Does NOT download the video.
+
+    This does not download the video.
     """
 
     process = await asyncio.create_subprocess_exec(
         "yt-dlp",
+
         "--dump-single-json",
+
         "--no-playlist",
+
         "--no-warnings",
+
         "--quiet",
+
+        "--no-check-certificates",
+
         url,
+
         stdout=asyncio.subprocess.PIPE,
+
         stderr=asyncio.subprocess.PIPE,
     )
 
@@ -97,13 +254,13 @@ async def get_video_info(url):
 
     if process.returncode != 0:
 
-        error = stderr.decode(
+        error_text = stderr.decode(
             "utf-8",
             errors="replace"
-        ).strip()
+        )
 
-        raise RuntimeError(
-            error or "Could not read video information."
+        raise parse_ytdlp_error(
+            error_text
         )
 
     try:
@@ -117,55 +274,116 @@ async def get_video_info(url):
 
     except json.JSONDecodeError:
 
-        raise RuntimeError(
-            "Invalid metadata returned by yt-dlp."
+        raise DownloaderError(
+            "Could not read video information."
         )
 
 
+# =========================================================
+# PROGRESS PARSER
+# =========================================================
+
 def parse_progress(line, state):
-
-    """
-    Parse yt-dlp progress output.
-
-    Example:
-
-    [download]  25.5% of 1.20GiB at 5.5MiB/s ETA 03:10
-    """
 
     line = line.strip()
 
-    percentage = re.search(
+    # -----------------------------------------------------
+    # Percentage
+    # -----------------------------------------------------
+
+    percentage_match = re.search(
         r"(\d+(?:\.\d+)?)%",
         line
     )
 
-    if percentage:
+    if percentage_match:
 
         try:
 
-            percent = float(
-                percentage.group(1)
+            percentage = float(
+                percentage_match.group(1)
             )
 
             if state.total:
+
                 state.downloaded = (
                     state.total
-                    * percent
+                    * percentage
                     / 100
                 )
 
-        except Exception:
+        except (TypeError, ValueError):
             pass
 
-    speed = re.search(
+    # -----------------------------------------------------
+    # Downloaded size
+    # -----------------------------------------------------
+
+    size_match = re.search(
+        r"of\s+([0-9.]+\s*[KMGTP]?i?B)",
+        line,
+        re.IGNORECASE
+    )
+
+    if size_match:
+
+        size_text = size_match.group(1)
+
+        match = re.match(
+            r"([0-9.]+)\s*([KMGTP]?i?)B",
+            size_text,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            try:
+
+                number = float(
+                    match.group(1)
+                )
+
+                unit = (
+                    match.group(2)
+                    .upper()
+                )
+
+                multipliers = {
+                    "": 1,
+                    "K": 1024,
+                    "KI": 1024,
+                    "M": 1024 ** 2,
+                    "MI": 1024 ** 2,
+                    "G": 1024 ** 3,
+                    "GI": 1024 ** 3,
+                    "T": 1024 ** 4,
+                    "TI": 1024 ** 4,
+                }
+
+                state.total = (
+                    number
+                    * multipliers.get(
+                        unit,
+                        1
+                    )
+                )
+
+            except (TypeError, ValueError):
+                pass
+
+    # -----------------------------------------------------
+    # Speed
+    # -----------------------------------------------------
+
+    speed_match = re.search(
         r"at\s+([0-9.]+\s*[KMGTP]?i?B/s)",
         line,
         re.IGNORECASE
     )
 
-    if speed:
+    if speed_match:
 
-        speed_text = speed.group(1)
+        speed_text = speed_match.group(1)
 
         match = re.match(
             r"([0-9.]+)\s*([KMGTP]?i?)B/s",
@@ -175,101 +393,172 @@ def parse_progress(line, state):
 
         if match:
 
-            number = float(
-                match.group(1)
-            )
+            try:
 
-            unit = match.group(2).upper()
-
-            multipliers = {
-                "": 1,
-                "K": 1024,
-                "KI": 1024,
-                "M": 1024 ** 2,
-                "MI": 1024 ** 2,
-                "G": 1024 ** 3,
-                "GI": 1024 ** 3,
-                "T": 1024 ** 4,
-                "TI": 1024 ** 4,
-            }
-
-            state.speed = (
-                number
-                * multipliers.get(
-                    unit,
-                    1
+                number = float(
+                    match.group(1)
                 )
-            )
 
-    eta = re.search(
+                unit = (
+                    match.group(2)
+                    .upper()
+                )
+
+                multipliers = {
+                    "": 1,
+                    "K": 1024,
+                    "KI": 1024,
+                    "M": 1024 ** 2,
+                    "MI": 1024 ** 2,
+                    "G": 1024 ** 3,
+                    "GI": 1024 ** 3,
+                    "T": 1024 ** 4,
+                    "TI": 1024 ** 4,
+                }
+
+                state.speed = (
+                    number
+                    * multipliers.get(
+                        unit,
+                        1
+                    )
+                )
+
+            except (TypeError, ValueError):
+                pass
+
+    # -----------------------------------------------------
+    # ETA
+    # -----------------------------------------------------
+
+    eta_match = re.search(
         r"ETA\s+(\d+:\d+)",
         line,
         re.IGNORECASE
     )
 
-    if eta:
-
-        parts = eta.group(1).split(":")
+    if eta_match:
 
         try:
 
-            if len(parts) == 2:
+            minutes, seconds = map(
+                int,
+                eta_match.group(1).split(":")
+            )
 
-                minutes = int(parts[0])
-                seconds = int(parts[1])
+            state.eta = (
+                minutes * 60
+                + seconds
+            )
 
-                state.eta = (
-                    minutes * 60
-                    + seconds
-                )
-
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
+
+# =========================================================
+# FIND DOWNLOADED FILE
+# =========================================================
+
+def find_downloaded_file(
+    before_files,
+    output_directory
+):
+
+    output_directory = Path(
+        output_directory
+    )
+
+    files = [
+        p
+        for p in output_directory.iterdir()
+        if p.is_file()
+    ]
+
+    # Prefer newly created/modified files.
+    new_files = [
+        p
+        for p in files
+        if p not in before_files
+    ]
+
+    if new_files:
+        files = new_files
+
+    if not files:
+        return None
+
+    files.sort(
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
+    return files[0]
+
+
+# =========================================================
+# DOWNLOAD VIDEO
+# =========================================================
 
 async def download_video(
     url,
     state
 ):
 
-    Path(DOWNLOAD_DIR).mkdir(
+    output_directory = Path(
+        DOWNLOAD_DIR
+    )
+
+    output_directory.mkdir(
         parents=True,
         exist_ok=True
     )
 
     state.status = "downloading"
 
+    before_files = set(
+        output_directory.iterdir()
+    )
+
     output_template = str(
-        Path(DOWNLOAD_DIR)
+        output_directory
         / "%(title)s.%(ext)s"
     )
 
     command = [
         "yt-dlp",
 
+        # Progress output.
         "--newline",
 
+        # Don't download playlists.
         "--no-playlist",
 
+        # Retry network failures.
         "--retries",
         "10",
 
         "--fragment-retries",
         "10",
 
+        # Network timeout.
         "--socket-timeout",
         "60",
 
+        # Continue partial files.
         "--continue",
 
+        # Don't overwrite completed files.
         "--no-overwrites",
 
+        # Prefer best available video + audio.
         "-f",
         "bv*+ba/b",
 
+        # Merge to MP4 where possible.
         "--merge-output-format",
         "mp4",
 
+        # Output filename.
         "-o",
         output_template,
 
@@ -278,7 +567,9 @@ async def download_video(
 
     process = await asyncio.create_subprocess_exec(
         *command,
+
         stdout=asyncio.subprocess.PIPE,
+
         stderr=asyncio.subprocess.STDOUT,
     )
 
@@ -293,7 +584,6 @@ async def download_video(
             line = await process.stdout.readline()
 
             if not line:
-
                 break
 
             text = line.decode(
@@ -303,9 +593,12 @@ async def download_video(
 
             if text:
 
-                output_lines.append(text)
+                output_lines.append(
+                    text
+                )
 
                 if len(output_lines) > 100:
+
                     output_lines.pop(0)
 
                 parse_progress(
@@ -313,10 +606,14 @@ async def download_video(
                     state
                 )
 
-            # User cancelled the job.
+            # -------------------------------------------------
+            # Cancellation
+            # -------------------------------------------------
+
             if state.cancelled:
 
                 try:
+
                     process.terminate()
 
                 except ProcessLookupError:
@@ -339,50 +636,63 @@ async def download_video(
 
                 state.status = "cancelled"
 
-                return None
+                raise DownloadCancelledError(
+                    "Download cancelled."
+                )
 
         return_code = await process.wait()
+
+        # -----------------------------------------------------
+        # Cancelled
+        # -----------------------------------------------------
 
         if state.cancelled:
 
             state.status = "cancelled"
 
-            return None
+            raise DownloadCancelledError(
+                "Download cancelled."
+            )
+
+        # -----------------------------------------------------
+        # Failed
+        # -----------------------------------------------------
 
         if return_code != 0:
 
-            error = "\n".join(
-                output_lines[-20:]
+            error_text = "\n".join(
+                output_lines[-30:]
             )
 
-            state.error = error
+            parsed_error = parse_ytdlp_error(
+                error_text
+            )
+
+            state.error = str(
+                parsed_error
+            )
 
             state.status = "error"
 
-            raise RuntimeError(
-                error or "yt-dlp failed."
-            )
+            raise parsed_error
 
-        # Find the newest media file.
-        files = [
-            p for p in Path(
-                DOWNLOAD_DIR
-            ).iterdir()
-            if p.is_file()
-        ]
+        # -----------------------------------------------------
+        # Find output file
+        # -----------------------------------------------------
 
-        if not files:
-
-            raise FileNotFoundError(
-                "Downloaded file was not found."
-            )
-
-        files.sort(
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
+        filepath = find_downloaded_file(
+            before_files,
+            output_directory
         )
 
-        filepath = files[0]
+        if not filepath:
+
+            state.status = "error"
+
+            raise DownloaderError(
+                "Download completed but "
+                "the output file could not be found."
+            )
 
         state.filename = str(
             filepath
@@ -425,3 +735,73 @@ async def download_video(
     finally:
 
         state.process = None
+
+
+# =========================================================
+# USER-FRIENDLY ERROR MESSAGE
+# =========================================================
+
+def user_friendly_error(error):
+
+    if isinstance(
+        error,
+        YouTubeVerificationError
+    ):
+
+        return (
+            "❌ <b>YouTube verification required.</b>\n\n"
+            "YouTube is currently requiring additional "
+            "verification for this server request.\n\n"
+            "Please try another supported public video URL."
+        )
+
+    if isinstance(
+        error,
+        PrivateVideoError
+    ):
+
+        return (
+            "❌ <b>Video unavailable.</b>\n\n"
+            "The video may be private, removed, "
+            "age-restricted, or otherwise unavailable."
+        )
+
+    if isinstance(
+        error,
+        UnsupportedVideoError
+    ):
+
+        return (
+            "❌ <b>Unsupported URL.</b>\n\n"
+            "Please send a valid public video URL "
+            "from a supported site."
+        )
+
+    if isinstance(
+        error,
+        DownloadCancelledError
+    ):
+
+        return (
+            "🛑 <b>Download cancelled.</b>"
+        )
+
+    message = str(error).strip()
+
+    if not message:
+
+        message = (
+            "The video could not be downloaded."
+        )
+
+    if len(message) > 800:
+
+        message = (
+            message[:800]
+            + "..."
+        )
+
+    return (
+        "❌ <b>Download failed.</b>\n\n"
+        f"<code>{message}</code>"
+    )
