@@ -17,9 +17,9 @@ from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 
@@ -34,6 +34,7 @@ from downloader import (
     get_video_info,
     format_bytes,
     format_duration,
+    user_friendly_error,
 )
 
 
@@ -50,9 +51,15 @@ RENDER_EXTERNAL_URL = os.getenv(
     ""
 ).rstrip("/")
 
-WEBHOOK_PATH = (
-    f"/telegram/{BOT_TOKEN}"
-)
+WEBHOOK_PATH = f"/telegram/{BOT_TOKEN}"
+
+
+# =========================================================
+# DEVELOPER
+# =========================================================
+
+DEVELOPER_NAME = "MASTERMIND"
+DEVELOPER_USERNAME = "Do_x_Die"
 
 
 # =========================================================
@@ -67,7 +74,7 @@ application = (
 
 
 # =========================================================
-# QUEUE
+# DOWNLOAD JOB
 # =========================================================
 
 @dataclass(order=True)
@@ -114,6 +121,10 @@ class DownloadJob:
     )
 
 
+# =========================================================
+# GLOBAL STATE
+# =========================================================
+
 job_counter = 0
 
 queue = asyncio.PriorityQueue()
@@ -129,8 +140,6 @@ all_jobs = {}
 
 PRIORITY_HIGH = 0
 PRIORITY_NORMAL = 10
-
-DEVELOPER_USERNAME = "Do_x_Die"
 
 
 def get_priority(update: Update):
@@ -210,7 +219,7 @@ def cancel_button(job_id):
 
 
 # =========================================================
-# START
+# /START
 # =========================================================
 
 async def start(
@@ -218,26 +227,29 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    text = (
-        "🎬 <b>VIDEO DOWNLOADER</b>\n\n"
+    if not update.message:
+        return
 
-        "Send me a public video URL.\n\n"
+    text = (
+        "🎬 <b>MASTER VIDEO HUB</b>\n\n"
+
+        "Send me a public video URL and "
+        "I will try to download it.\n\n"
 
         "✨ <b>Features</b>\n"
-        "• 🎬 Full video title\n"
-        "• 🖼️ Thumbnail information\n"
-        "• ⏱️ Duration\n"
+        "• 🎬 Video title\n"
+        "• ⏱ Duration\n"
         "• 📦 File size\n"
         "• 📊 Live progress\n"
         "• ⚡ Download speed\n"
         "• ⏳ ETA\n"
-        "• 🔄 Retry support\n"
         "• 📥 Queue system\n"
         "• ⭐ Priority system\n"
         "• 🛑 Cancel download\n"
-        "• 🎞️ FFmpeg support\n\n"
+        "• 🔄 Retry support\n\n"
 
-        "👨‍💻 <b>Developer:</b> MASTERMIND"
+        f"👨‍💻 <b>Developer:</b> "
+        f"{DEVELOPER_NAME}"
     )
 
     await update.message.reply_text(
@@ -248,7 +260,7 @@ async def start(
 
 
 # =========================================================
-# DEVELOPER
+# DEVELOPER BUTTON
 # =========================================================
 
 async def developer_callback(
@@ -258,12 +270,16 @@ async def developer_callback(
 
     query = update.callback_query
 
+    if not query:
+        return
+
     await query.answer()
 
     text = (
-        "👨‍💻 <b>Developer</b>\n\n"
-        "Name: <b>MASTERMIND</b>\n"
-        "Username: <b>@Do_x_Die</b>"
+        "👨‍💻 <b>Developer Information</b>\n\n"
+
+        f"Name: <b>{DEVELOPER_NAME}</b>\n"
+        f"Username: <b>@{DEVELOPER_USERNAME}</b>"
     )
 
     await query.edit_message_text(
@@ -274,7 +290,7 @@ async def developer_callback(
 
 
 # =========================================================
-# BACK
+# BACK BUTTON
 # =========================================================
 
 async def back_callback(
@@ -284,10 +300,13 @@ async def back_callback(
 
     query = update.callback_query
 
+    if not query:
+        return
+
     await query.answer()
 
     text = (
-        "🎬 <b>VIDEO DOWNLOADER</b>\n\n"
+        "🎬 <b>MASTER VIDEO HUB</b>\n\n"
         "Send me a public video URL."
     )
 
@@ -332,9 +351,12 @@ def progress_text(job):
             / state.total
         ) * 100
 
-        percentage = min(
-            percentage,
-            100
+        percentage = max(
+            0,
+            min(
+                percentage,
+                100
+            )
         )
 
         progress = (
@@ -343,20 +365,21 @@ def progress_text(job):
 
     else:
 
-        progress = (
-            "Calculating..."
-        )
+        progress = "Calculating..."
 
     speed = format_bytes(
         state.speed
     )
 
     if state.speed:
+
         speed += "/s"
+
     else:
+
         speed = "Calculating..."
 
-    if state.eta:
+    if state.eta is not None:
 
         eta = format_duration(
             state.eta
@@ -390,9 +413,7 @@ def progress_text(job):
 # QUEUE POSITION
 # =========================================================
 
-async def get_queue_position(
-    job_id
-):
+async def get_queue_position(job_id):
 
     items = list(
         queue._queue
@@ -463,6 +484,9 @@ async def handle_url(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+        return
+
     url = update.message.text.strip()
 
     if not url.startswith(
@@ -488,19 +512,23 @@ async def handle_url(
 
     except Exception as exc:
 
-        error = str(exc)
+        message = user_friendly_error(
+            exc
+        )
 
-        if len(error) > 1000:
-            error = (
-                error[:1000]
-                + "..."
+        try:
+
+            await analyzing.edit_text(
+                message,
+                parse_mode="HTML"
             )
 
-        await analyzing.edit_text(
-            "❌ <b>Could not read this video.</b>\n\n"
-            f"<code>{error}</code>",
-            parse_mode="HTML"
-        )
+        except Exception:
+
+            await update.message.reply_text(
+                message,
+                parse_mode="HTML"
+            )
 
         return
 
@@ -519,11 +547,15 @@ async def handle_url(
         or 0
     )
 
-    size_text = (
-        format_bytes(filesize)
-        if filesize
-        else "Unknown"
-    )
+    if filesize:
+
+        size_text = format_bytes(
+            filesize
+        )
+
+    else:
+
+        size_text = "Unknown"
 
     job = await create_job(
         update,
@@ -540,15 +572,11 @@ async def handle_url(
         == PRIORITY_HIGH
     ):
 
-        priority_text = (
-            "🔴 High"
-        )
+        priority_text = "🔴 High"
 
     else:
 
-        priority_text = (
-            "🟡 Normal"
-        )
+        priority_text = "🟡 Normal"
 
     text = (
         f"🎬 <b>{title}</b>\n\n"
@@ -578,7 +606,7 @@ async def handle_url(
 
 
 # =========================================================
-# CANCEL
+# CANCEL DOWNLOAD
 # =========================================================
 
 async def cancel_callback(
@@ -587,6 +615,9 @@ async def cancel_callback(
 ):
 
     query = update.callback_query
+
+    if not query:
+        return
 
     await query.answer()
 
@@ -654,14 +685,20 @@ async def cancel_callback(
 
             pass
 
-    await query.edit_message_text(
-        "🛑 <b>Download cancelled.</b>",
-        parse_mode="HTML"
-    )
+    try:
+
+        await query.edit_message_text(
+            "🛑 <b>Download cancelled.</b>",
+            parse_mode="HTML"
+        )
+
+    except Exception:
+
+        pass
 
 
 # =========================================================
-# PROCESS JOB
+# PROCESS DOWNLOAD
 # =========================================================
 
 async def process_job(job):
@@ -677,17 +714,15 @@ async def process_job(job):
 
     try:
 
-        status = (
-            await application.bot.send_message(
-                chat_id=job.chat_id,
-                text=(
-                    "🚀 <b>Download started!</b>\n\n"
-                    "Preparing..."
-                ),
-                parse_mode="HTML",
-                reply_markup=cancel_button(
-                    job.job_id
-                )
+        status = await application.bot.send_message(
+            chat_id=job.chat_id,
+            text=(
+                "🚀 <b>Download started!</b>\n\n"
+                "Preparing..."
+            ),
+            parse_mode="HTML",
+            reply_markup=cancel_button(
+                job.job_id
             )
         )
 
@@ -733,6 +768,7 @@ async def process_job(job):
                         last_update = now
 
                     except Exception:
+
                         pass
 
                 await asyncio.sleep(1)
@@ -752,7 +788,18 @@ async def process_job(job):
 
             progress_task.cancel()
 
-        # Cancelled.
+            try:
+
+                await progress_task
+
+            except asyncio.CancelledError:
+
+                pass
+
+        # -------------------------------------------------
+        # Cancelled
+        # -------------------------------------------------
+
         if (
             job.cancelled
             or job.state.cancelled
@@ -765,6 +812,7 @@ async def process_job(job):
 
                 try:
                     os.remove(filepath)
+
                 except OSError:
                     pass
 
@@ -780,9 +828,14 @@ async def process_job(job):
                 )
 
             except Exception:
+
                 pass
 
             return
+
+        # -------------------------------------------------
+        # File check
+        # -------------------------------------------------
 
         if (
             not filepath
@@ -797,21 +850,46 @@ async def process_job(job):
             filepath
         )
 
-        await application.bot.edit_message_text(
-            chat_id=job.chat_id,
-            message_id=job.status_message_id,
-            text=(
-                progress_text(job)
-                + "\n\n"
-                "✅ <b>Download completed!</b>\n"
-                f"📦 {format_bytes(file_size)}"
-            ),
-            parse_mode="HTML"
-        )
+        # -------------------------------------------------
+        # Completed
+        # -------------------------------------------------
+
+        try:
+
+            await application.bot.edit_message_text(
+                chat_id=job.chat_id,
+                message_id=job.status_message_id,
+                text=(
+                    progress_text(job)
+                    + "\n\n"
+                    "✅ <b>Download completed!</b>\n"
+                    f"📦 {format_bytes(file_size)}"
+                ),
+                parse_mode="HTML"
+            )
+
+        except Exception:
+
+            pass
+
+        # -------------------------------------------------
+        # Upload
+        # -------------------------------------------------
 
         await application.bot.send_chat_action(
             chat_id=job.chat_id,
             action=ChatAction.UPLOAD_DOCUMENT
+        )
+
+        title = job.state.info.get(
+            "title",
+            "Video"
+        )
+
+        duration = format_duration(
+            job.state.info.get(
+                "duration"
+            )
         )
 
         with open(
@@ -826,8 +904,8 @@ async def process_job(job):
                     filepath
                 ),
                 caption=(
-                    f"🎬 {job.state.info.get('title', 'Video')}\n"
-                    f"⏱ {format_duration(job.state.info.get('duration'))}"
+                    f"🎬 {title}\n"
+                    f"⏱ {duration}"
                 ),
                 read_timeout=1800,
                 write_timeout=1800,
@@ -841,29 +919,34 @@ async def process_job(job):
             job.cancelled
             or job.state.cancelled
         ):
+
             return
 
-        error = str(exc)
-
-        if len(error) > 1200:
-
-            error = (
-                error[:1200]
-                + "..."
-            )
+        message = user_friendly_error(
+            exc
+        )
 
         try:
 
-            await application.bot.send_message(
-                chat_id=job.chat_id,
-                text=(
-                    "❌ <b>Download failed.</b>\n\n"
-                    f"<code>{error}</code>"
-                ),
-                parse_mode="HTML"
-            )
+            if job.status_message_id:
+
+                await application.bot.edit_message_text(
+                    chat_id=job.chat_id,
+                    message_id=job.status_message_id,
+                    text=message,
+                    parse_mode="HTML"
+                )
+
+            else:
+
+                await application.bot.send_message(
+                    chat_id=job.chat_id,
+                    text=message,
+                    parse_mode="HTML"
+                )
 
         except Exception:
+
             pass
 
     finally:
@@ -879,8 +962,11 @@ async def process_job(job):
         ):
 
             try:
+
                 os.remove(filepath)
+
             except OSError:
+
                 pass
 
         all_jobs.pop(
@@ -895,13 +981,24 @@ async def process_job(job):
 
 async def queue_worker():
 
+    semaphore = asyncio.Semaphore(
+        max(
+            1,
+            MAX_CONCURRENT_DOWNLOADS
+        )
+    )
+
     while True:
 
         job = await queue.get()
 
         try:
 
-            if not job.cancelled:
+            if job.cancelled:
+
+                continue
+
+            async with semaphore:
 
                 await process_job(
                     job
@@ -911,7 +1008,7 @@ async def queue_worker():
 
             print(
                 "Queue worker error:",
-                exc
+                repr(exc)
             )
 
         finally:
@@ -920,7 +1017,22 @@ async def queue_worker():
 
 
 # =========================================================
-# WEBHOOK
+# HEALTH CHECK
+# =========================================================
+
+async def health_check(
+    request: web.Request
+):
+
+    return web.Response(
+        text=(
+            "Master Video Hub is running."
+        )
+    )
+
+
+# =========================================================
+# TELEGRAM WEBHOOK
 # =========================================================
 
 async def telegram_webhook(
@@ -948,7 +1060,7 @@ async def telegram_webhook(
 
         print(
             "Webhook error:",
-            exc
+            repr(exc)
         )
 
         return web.Response(
@@ -958,48 +1070,61 @@ async def telegram_webhook(
 
 
 # =========================================================
-# HEALTH CHECK
-# =========================================================
-
-async def health_check(
-    request: web.Request
-):
-
-    return web.Response(
-        text=(
-            "Video Downloader Bot is running."
-        )
-    )
-
-
-# =========================================================
-# RUN SERVER
+# MAIN
 # =========================================================
 
 async def run():
 
+    if not BOT_TOKEN:
+
+        raise RuntimeError(
+            "BOT_TOKEN is missing."
+        )
+
     if not RENDER_EXTERNAL_URL:
 
         raise RuntimeError(
-            "RENDER_EXTERNAL_URL "
-            "environment variable is missing."
+            "RENDER_EXTERNAL_URL is missing."
         )
+
+    # ---------------------------------------------
+    # Telegram application
+    # ---------------------------------------------
 
     await application.initialize()
 
     await application.start()
 
+    # ---------------------------------------------
+    # Webhook
+    # ---------------------------------------------
+
+    webhook_url = (
+        RENDER_EXTERNAL_URL
+        + WEBHOOK_PATH
+    )
+
     await application.bot.set_webhook(
-        url=(
-            RENDER_EXTERNAL_URL
-            + WEBHOOK_PATH
-        ),
+        url=webhook_url,
         drop_pending_updates=True
     )
+
+    print(
+        "Telegram webhook:",
+        webhook_url
+    )
+
+    # ---------------------------------------------
+    # Queue worker
+    # ---------------------------------------------
 
     asyncio.create_task(
         queue_worker()
     )
+
+    # ---------------------------------------------
+    # HTTP server
+    # ---------------------------------------------
 
     server = web.Application()
 
@@ -1032,7 +1157,7 @@ async def run():
     )
 
     print(
-        "Telegram webhook is active."
+        "Master Video Hub is LIVE."
     )
 
     try:
@@ -1090,7 +1215,7 @@ application.add_handler(
 
 
 # =========================================================
-# START
+# START SERVER
 # =========================================================
 
 if __name__ == "__main__":
