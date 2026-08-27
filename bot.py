@@ -23,7 +23,10 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, MAX_CONCURRENT_DOWNLOADS
+from config import (
+    BOT_TOKEN,
+    MAX_CONCURRENT_DOWNLOADS,
+)
 
 from downloader import (
     DownloadState,
@@ -38,14 +41,18 @@ from downloader import (
 # RENDER CONFIG
 # =========================================================
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(
+    os.getenv("PORT", "10000")
+)
 
 RENDER_EXTERNAL_URL = os.getenv(
     "RENDER_EXTERNAL_URL",
     ""
 ).rstrip("/")
 
-WEBHOOK_PATH = f"/telegram/{BOT_TOKEN}"
+WEBHOOK_PATH = (
+    f"/telegram/{BOT_TOKEN}"
+)
 
 
 # =========================================================
@@ -115,8 +122,6 @@ active_jobs = {}
 
 all_jobs = {}
 
-queue_worker_started = False
-
 
 # =========================================================
 # PRIORITY
@@ -125,8 +130,6 @@ queue_worker_started = False
 PRIORITY_HIGH = 0
 PRIORITY_NORMAL = 10
 
-
-# Developer gets high priority.
 DEVELOPER_USERNAME = "Do_x_Die"
 
 
@@ -139,7 +142,10 @@ def get_priority(update: Update):
 
     username = user.username or ""
 
-    if username.lower() == DEVELOPER_USERNAME.lower():
+    if (
+        username.lower()
+        == DEVELOPER_USERNAME.lower()
+    ):
         return PRIORITY_HIGH
 
     return PRIORITY_NORMAL
@@ -160,21 +166,9 @@ def developer_button():
         ]
     ]
 
-    return InlineKeyboardMarkup(keyboard)
-
-
-def cancel_button(job_id):
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🛑 Cancel Download",
-                callback_data=f"cancel:{job_id}"
-            )
-        ]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
 
 def developer_menu():
@@ -194,7 +188,25 @@ def developer_menu():
         ]
     ]
 
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        keyboard
+    )
+
+
+def cancel_button(job_id):
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🛑 Cancel Download",
+                callback_data=f"cancel:{job_id}"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
 
 # =========================================================
@@ -208,6 +220,7 @@ async def start(
 
     text = (
         "🎬 <b>VIDEO DOWNLOADER</b>\n\n"
+
         "Send me a public video URL.\n\n"
 
         "✨ <b>Features</b>\n"
@@ -324,11 +337,15 @@ def progress_text(job):
             100
         )
 
-        progress = f"{percentage:.1f}%"
+        progress = (
+            f"{percentage:.1f}%"
+        )
 
     else:
 
-        progress = "Calculating..."
+        progress = (
+            "Calculating..."
+        )
 
     speed = format_bytes(
         state.speed
@@ -340,10 +357,13 @@ def progress_text(job):
         speed = "Calculating..."
 
     if state.eta:
+
         eta = format_duration(
             state.eta
         )
+
     else:
+
         eta = "Calculating..."
 
     return (
@@ -367,12 +387,16 @@ def progress_text(job):
 
 
 # =========================================================
-# GET POSITION
+# QUEUE POSITION
 # =========================================================
 
-async def get_queue_position(job_id):
+async def get_queue_position(
+    job_id
+):
 
-    items = list(queue._queue)
+    items = list(
+        queue._queue
+    )
 
     items.sort()
 
@@ -382,6 +406,7 @@ async def get_queue_position(job_id):
     ):
 
         if job.job_id == job_id:
+
             return position
 
     return 0
@@ -407,7 +432,9 @@ async def create_job(
 
     state.info = info
 
-    priority = get_priority(update)
+    priority = get_priority(
+        update
+    )
 
     job = DownloadJob(
         priority=priority,
@@ -443,7 +470,7 @@ async def handle_url(
     ):
 
         await update.message.reply_text(
-            "❌ Please send a valid URL."
+            "❌ Please send a valid video URL."
         )
 
         return
@@ -464,7 +491,10 @@ async def handle_url(
         error = str(exc)
 
         if len(error) > 1000:
-            error = error[:1000] + "..."
+            error = (
+                error[:1000]
+                + "..."
+            )
 
         await analyzing.edit_text(
             "❌ <b>Could not read this video.</b>\n\n"
@@ -505,11 +535,20 @@ async def handle_url(
         job.job_id
     )
 
-    priority_text = (
-        "🔴 High"
-        if job.priority == PRIORITY_HIGH
-        else "🟡 Normal"
-    )
+    if (
+        job.priority
+        == PRIORITY_HIGH
+    ):
+
+        priority_text = (
+            "🔴 High"
+        )
+
+    else:
+
+        priority_text = (
+            "🟡 Normal"
+        )
 
     text = (
         f"🎬 <b>{title}</b>\n\n"
@@ -579,7 +618,10 @@ async def cancel_callback(
 
         return
 
-    if job.user_id != query.from_user.id:
+    if (
+        job.user_id
+        != query.from_user.id
+    ):
 
         await query.answer(
             "This is not your download.",
@@ -598,7 +640,19 @@ async def cancel_callback(
         return
 
     job.cancelled = True
+
     job.state.cancelled = True
+
+    # Stop running yt-dlp process.
+    if job.state.process:
+
+        try:
+
+            job.state.process.terminate()
+
+        except ProcessLookupError:
+
+            pass
 
     await query.edit_message_text(
         "🛑 <b>Download cancelled.</b>",
@@ -607,7 +661,7 @@ async def cancel_callback(
 
 
 # =========================================================
-# DOWNLOAD WORKER
+# PROCESS JOB
 # =========================================================
 
 async def process_job(job):
@@ -615,19 +669,25 @@ async def process_job(job):
     if job.cancelled:
         return
 
-    active_jobs[job.job_id] = job
+    active_jobs[
+        job.job_id
+    ] = job
+
+    filepath = None
 
     try:
 
-        status = await application.bot.send_message(
-            chat_id=job.chat_id,
-            text=(
-                "🚀 <b>Download started!</b>\n\n"
-                "Preparing..."
-            ),
-            parse_mode="HTML",
-            reply_markup=cancel_button(
-                job.job_id
+        status = (
+            await application.bot.send_message(
+                chat_id=job.chat_id,
+                text=(
+                    "🚀 <b>Download started!</b>\n\n"
+                    "Preparing..."
+                ),
+                parse_mode="HTML",
+                reply_markup=cancel_button(
+                    job.job_id
+                )
             )
         )
 
@@ -645,14 +705,18 @@ async def process_job(job):
                 job.state.status
                 not in (
                     "finished",
-                    "error"
+                    "error",
+                    "cancelled"
                 )
                 and not job.cancelled
             ):
 
                 now = time.monotonic()
 
-                if now - last_update >= 3:
+                if (
+                    now - last_update
+                    >= 3
+                ):
 
                     try:
 
@@ -688,24 +752,41 @@ async def process_job(job):
 
             progress_task.cancel()
 
-        if job.cancelled:
+        # Cancelled.
+        if (
+            job.cancelled
+            or job.state.cancelled
+        ):
 
-            if filepath and os.path.exists(
+            if (
                 filepath
+                and os.path.exists(filepath)
             ):
-                os.remove(filepath)
 
-            await application.bot.edit_message_text(
-                chat_id=job.chat_id,
-                message_id=job.status_message_id,
-                text="🛑 <b>Download cancelled.</b>",
-                parse_mode="HTML"
-            )
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+
+            try:
+
+                await application.bot.edit_message_text(
+                    chat_id=job.chat_id,
+                    message_id=job.status_message_id,
+                    text=(
+                        "🛑 <b>Download cancelled.</b>"
+                    ),
+                    parse_mode="HTML"
+                )
+
+            except Exception:
+                pass
 
             return
 
-        if not filepath or not os.path.exists(
-            filepath
+        if (
+            not filepath
+            or not os.path.exists(filepath)
         ):
 
             raise RuntimeError(
@@ -756,10 +837,20 @@ async def process_job(job):
 
     except Exception as exc:
 
+        if (
+            job.cancelled
+            or job.state.cancelled
+        ):
+            return
+
         error = str(exc)
 
         if len(error) > 1200:
-            error = error[:1200] + "..."
+
+            error = (
+                error[:1200]
+                + "..."
+            )
 
         try:
 
@@ -782,22 +873,15 @@ async def process_job(job):
             None
         )
 
-        # Remove local file.
-        try:
+        if (
+            filepath
+            and os.path.exists(filepath)
+        ):
 
-            filepath = locals().get(
-                "filepath"
-            )
-
-            if (
-                filepath
-                and os.path.exists(filepath)
-            ):
-
+            try:
                 os.remove(filepath)
-
-        except Exception:
-            pass
+            except OSError:
+                pass
 
         all_jobs.pop(
             job.job_id,
@@ -817,17 +901,16 @@ async def queue_worker():
 
         try:
 
-            if job.cancelled:
-                continue
+            if not job.cancelled:
 
-            await process_job(
-                job
-            )
+                await process_job(
+                    job
+                )
 
         except Exception as exc:
 
             print(
-                "Worker error:",
+                "Queue worker error:",
                 exc
             )
 
@@ -883,12 +966,14 @@ async def health_check(
 ):
 
     return web.Response(
-        text="Video Downloader Bot is running."
+        text=(
+            "Video Downloader Bot is running."
+        )
     )
 
 
 # =========================================================
-# SERVER
+# RUN SERVER
 # =========================================================
 
 async def run():
@@ -896,7 +981,8 @@ async def run():
     if not RENDER_EXTERNAL_URL:
 
         raise RuntimeError(
-            "RENDER_EXTERNAL_URL environment variable is missing."
+            "RENDER_EXTERNAL_URL "
+            "environment variable is missing."
         )
 
     await application.initialize()
