@@ -1,91 +1,66 @@
-import asyncio
 import os
-import shutil
-import time
+import asyncio
+from aiohttp import web
 
-from telegram import Update
-from telegram.constants import ChatAction
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-from config import (
-    BOT_TOKEN,
-    MAX_CONCURRENT_DOWNLOADS,
+from config import BOT_TOKEN
+
+
+# =========================
+# CONFIG
+# =========================
+
+PORT = int(os.getenv("PORT", "10000"))
+
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL",
+    ""
+).rstrip("/")
+
+WEBHOOK_PATH = f"/telegram/{BOT_TOKEN}"
+
+
+# =========================
+# TELEGRAM APPLICATION
+# =========================
+
+application = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .build()
 )
 
-from downloader import (
-    DownloadState,
-    download_video,
-    format_bytes,
-    format_duration,
-)
 
+# =========================
+# START MENU
+# =========================
 
-download_slots = asyncio.Semaphore(
-    MAX_CONCURRENT_DOWNLOADS
-)
+def main_menu():
 
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "👨‍💻 Developer",
+                callback_data="developer"
+            )
+        ]
+    ]
 
-def make_progress(state):
-
-    title = state.info.get(
-        "title",
-        "Reading video information..."
-    )
-
-    duration = format_duration(
-        state.info.get("duration")
-    )
-
-    downloaded = format_bytes(
-        state.downloaded
-    )
-
-    total = format_bytes(
-        state.total
-    )
-
-    if state.total:
-
-        percent = (
-            state.downloaded /
-            state.total
-        ) * 100
-
-        percent = min(
-            percent,
-            100
-        )
-
-        progress = f"{percent:.1f}%"
-
-    else:
-        progress = "Calculating..."
-
-    speed = (
-        format_bytes(state.speed)
-        + "/s"
-    )
-
-    eta = (
-        format_duration(state.eta)
-        if state.eta
-        else "Calculating..."
-    )
-
-    return (
-        f"🎬 <b>{title}</b>\n\n"
-        f"⏱ Duration: <code>{duration}</code>\n"
-        f"📦 Size: <code>{downloaded} / {total}</code>\n"
-        f"📊 Progress: <code>{progress}</code>\n"
-        f"⚡ Speed: <code>{speed}</code>\n"
-        f"⏳ ETA: <code>{eta}</code>"
-    )
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def start(
@@ -93,17 +68,99 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    await update.message.reply_text(
-        "👋 Send a public video URL.\n\n"
-        "The bot will show:\n"
-        "🎬 Title\n"
-        "⏱ Duration\n"
-        "📦 Size\n"
-        "📊 Progress\n"
-        "⚡ Speed\n"
-        "⏳ ETA"
+    text = (
+        "🎬 <b>VIDEO DOWNLOADER</b>\n\n"
+        "Send me a public video URL.\n\n"
+        "✨ Features:\n"
+        "• 🎬 Video title\n"
+        "• 🖼️ Thumbnail\n"
+        "• ⏱️ Duration\n"
+        "• 📦 File size\n"
+        "• 📊 Download progress\n"
+        "• ⚡ Speed & ETA\n"
+        "• 🔄 Retry / Resume\n"
+        "• 📥 Queue\n"
+        "• ⭐ Priority\n"
+        "• 🛑 Cancel download\n\n"
+        "👨‍💻 <b>Developer:</b> MASTERMIND"
     )
 
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+
+# =========================
+# DEVELOPER BUTTON
+# =========================
+
+async def developer_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "👨‍💻 @Do_x_Die",
+                url="https://t.me/Do_x_Die"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Back",
+                callback_data="back"
+            )
+        ]
+    ]
+
+    text = (
+        "👨‍💻 <b>Developer</b>\n\n"
+        "Name: <b>MASTERMIND</b>\n"
+        "Username: <b>@Do_x_Die</b>"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# BACK BUTTON
+# =========================
+
+async def back_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    text = (
+        "🎬 <b>VIDEO DOWNLOADER</b>\n\n"
+        "Send me a public video URL."
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+
+# =========================
+# URL HANDLER
+# =========================
 
 async def handle_url(
     update: Update,
@@ -117,179 +174,186 @@ async def handle_url(
     ):
 
         await update.message.reply_text(
-            "❌ Please send a valid URL."
+            "❌ Please send a valid video URL."
         )
 
         return
 
-    status = await update.message.reply_text(
-        "🔎 Reading video information..."
+    await update.message.reply_text(
+        "🔎 <b>Analyzing video...</b>\n\n"
+        "Please wait.",
+        parse_mode="HTML"
     )
 
-    state = DownloadState()
+    # Downloader integration will be added
+    # in downloader.py.
 
-    async with download_slots:
-
-        last_update = 0
-
-        async def progress_loop():
-
-            nonlocal last_update
-
-            while state.status not in (
-                "finished",
-                "error",
-            ):
-
-                now = time.monotonic()
-
-                if now - last_update >= 3:
-
-                    try:
-
-                        await status.edit_text(
-                            make_progress(state),
-                            parse_mode="HTML"
-                        )
-
-                        last_update = now
-
-                    except Exception:
-                        pass
-
-                await asyncio.sleep(1)
-
-        progress_task = asyncio.create_task(
-            progress_loop()
-        )
-
-        filepath = None
-
-        try:
-
-            filepath = await download_video(
-                url,
-                state
-            )
-
-            progress_task.cancel()
-
-            await status.edit_text(
-                make_progress(state)
-                + "\n\n"
-                "✅ <b>Download complete.</b>",
-                parse_mode="HTML"
-            )
-
-            if not filepath or not os.path.exists(
-                filepath
-            ):
-
-                raise RuntimeError(
-                    "Downloaded file was not found."
-                )
-
-            file_size = os.path.getsize(
-                filepath
-            )
-
-            await update.message.reply_text(
-                "📤 Preparing upload...\n"
-                f"📦 {format_bytes(file_size)}"
-            )
-
-            await update.message.chat.send_action(
-                ChatAction.UPLOAD_DOCUMENT
-            )
-
-            with open(
-                filepath,
-                "rb"
-            ) as video:
-
-                await update.message.reply_document(
-                    document=video,
-                    filename=os.path.basename(
-                        filepath
-                    ),
-                    caption=(
-                        f"🎬 {state.info.get('title', 'Video')}\n"
-                        f"⏱ {format_duration(state.info.get('duration'))}"
-                    ),
-                    read_timeout=1800,
-                    write_timeout=1800,
-                    connect_timeout=60,
-                    pool_timeout=60,
-                )
-
-        except Exception as exc:
-
-            progress_task.cancel()
-
-            message = str(exc)
-
-            if len(message) > 1200:
-                message = (
-                    message[:1200]
-                    + "..."
-                )
-
-            try:
-
-                await status.edit_text(
-                    "❌ <b>Failed</b>\n\n"
-                    f"<code>{message}</code>",
-                    parse_mode="HTML"
-                )
-
-            except Exception:
-
-                await update.message.reply_text(
-                    "❌ Download failed."
-                )
-
-        finally:
-
-            if filepath and os.path.exists(
-                filepath
-            ):
-
-                try:
-                    os.remove(filepath)
-
-                except OSError:
-                    pass
-
-
-def main():
-
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
+    # Temporary response for testing.
+    await update.message.reply_text(
+        "✅ URL received!\n\n"
+        f"🔗 <code>{url}</code>\n\n"
+        "📥 Downloader engine will process it.",
+        parse_mode="HTML"
     )
 
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+
+# =========================
+# ERROR HANDLER
+# =========================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    print(
+        "Telegram error:",
+        context.error
     )
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            handle_url
+
+# =========================
+# WEBHOOK SERVER
+# =========================
+
+async def telegram_webhook(
+    request: web.Request
+):
+
+    data = await request.json()
+
+    update = Update.de_json(
+        data,
+        application.bot
+    )
+
+    await application.process_update(
+        update
+    )
+
+    return web.Response(
+        text="OK"
+    )
+
+
+async def health_check(
+    request: web.Request
+):
+
+    return web.Response(
+        text="Video Downloader Bot is running."
+    )
+
+
+# =========================
+# START WEB SERVER
+# =========================
+
+async def run():
+
+    if not RENDER_EXTERNAL_URL:
+
+        raise RuntimeError(
+            "RENDER_EXTERNAL_URL is missing."
         )
+
+    await application.initialize()
+
+    await application.start()
+
+    await application.bot.set_webhook(
+        url=(
+            RENDER_EXTERNAL_URL
+            + WEBHOOK_PATH
+        ),
+        drop_pending_updates=True
+    )
+
+    server = web.Application()
+
+    server.router.add_get(
+        "/",
+        health_check
+    )
+
+    server.router.add_post(
+        WEBHOOK_PATH,
+        telegram_webhook
+    )
+
+    runner = web.AppRunner(server)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        PORT
+    )
+
+    await site.start()
+
+    print(
+        f"Server running on port {PORT}"
     )
 
     print(
-        "Telegram downloader bot started."
+        "Telegram webhook configured."
     )
 
-    app.run_polling()
+    try:
 
+        await asyncio.Event().wait()
+
+    finally:
+
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
+
+
+# =========================
+# HANDLERS
+# =========================
+
+application.add_handler(
+    CommandHandler(
+        "start",
+        start
+    )
+)
+
+application.add_handler(
+    CallbackQueryHandler(
+        developer_callback,
+        pattern="^developer$"
+    )
+)
+
+application.add_handler(
+    CallbackQueryHandler(
+        back_callback,
+        pattern="^back$"
+    )
+)
+
+application.add_handler(
+    MessageHandler(
+        filters.TEXT
+        & ~filters.COMMAND,
+        handle_url
+    )
+)
+
+application.add_error_handler(
+    error_handler
+)
+
+
+# =========================
+# ENTRY POINT
+# =========================
 
 if __name__ == "__main__":
-    main()
+
+    asyncio.run(run())
