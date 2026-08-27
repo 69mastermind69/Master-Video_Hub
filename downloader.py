@@ -9,18 +9,8 @@ from config import DOWNLOAD_DIR
 
 
 def safe_filename(name: str) -> str:
-    name = re.sub(
-        r'[\\/*?:"<>|]',
-        "_",
-        name
-    )
-
-    name = re.sub(
-        r"\s+",
-        " ",
-        name
-    ).strip()
-
+    name = re.sub(r'[\\/*?:"<>|]', "_", name)
+    name = re.sub(r"\s+", " ", name).strip()
     return name[:180] or "video"
 
 
@@ -30,10 +20,9 @@ def format_bytes(value):
 
     value = float(value)
 
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
         if value < 1024:
             return f"{value:.1f} {unit}"
-
         value /= 1024
 
     return f"{value:.1f} PB"
@@ -47,41 +36,38 @@ def format_duration(seconds):
 
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
-    seconds = seconds % 60
+    seconds %= 60
 
-    if hours:
-        return (
-            f"{hours:02d}:"
-            f"{minutes:02d}:"
-            f"{seconds:02d}"
-        )
-
-    return (
-        f"{minutes:02d}:"
-        f"{seconds:02d}"
-    )
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 class DownloadState:
 
     def __init__(self):
         self.status = "starting"
+
         self.info = {}
+
         self.downloaded = 0
         self.total = 0
+
         self.speed = 0
         self.eta = None
+
         self.filename = None
+
         self.error = None
 
+        self.cancelled = False
 
-def build_options(state):
+
+def create_options(state):
 
     def progress_hook(data):
 
         state.status = data.get(
             "status",
-            "unknown"
+            state.status
         )
 
         state.downloaded = (
@@ -106,39 +92,64 @@ def build_options(state):
             state.filename = data["filename"]
 
     return {
-
-        # Best available video + audio.
+        # Best available video/audio.
         "format": "bv*+ba/b",
 
-        # FFmpeg merge.
+        # Use FFmpeg for merging.
         "merge_output_format": "mp4",
 
-        # Never load the complete video into RAM.
+        # Store downloads on Render disk.
         "outtmpl": str(
-            DOWNLOAD_DIR /
-            "%(title)s.%(ext)s"
+            Path(DOWNLOAD_DIR)
+            / "%(title)s.%(ext)s"
         ),
 
-        # Resume incomplete downloads.
+        # Resume partial downloads.
         "continuedl": True,
 
-        # Retry temporary failures.
+        # Retry temporary network errors.
         "retries": 10,
         "fragment_retries": 10,
 
         # Long-video friendly timeout.
         "socket_timeout": 60,
 
-        # Progress.
+        # Progress callback.
         "progress_hooks": [
             progress_hook
         ],
 
+        # One URL = one video.
         "noplaylist": True,
+
+        # Don't create unnecessary files.
+        "writethumbnail": False,
 
         "quiet": True,
         "no_warnings": True,
     }
+
+
+async def get_video_info(url: str):
+
+    def worker():
+
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": 30,
+        }
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            return ydl.extract_info(
+                url,
+                download=False
+            )
+
+    return await asyncio.to_thread(
+        worker
+    )
 
 
 async def download_video(
@@ -146,13 +157,16 @@ async def download_video(
     state: DownloadState
 ):
 
+    Path(DOWNLOAD_DIR).mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     def worker():
 
-        options = build_options(state)
+        options = create_options(state)
 
-        with yt_dlp.YoutubeDL(
-            options
-        ) as ydl:
+        with yt_dlp.YoutubeDL(options) as ydl:
 
             info = ydl.extract_info(
                 url,
@@ -180,7 +194,7 @@ async def download_video(
 
             for path in candidates:
 
-                if os.path.exists(path):
+                if os.path.isfile(path):
                     return path
 
             return filename
@@ -192,6 +206,11 @@ async def download_video(
         filepath = await asyncio.to_thread(
             worker
         )
+
+        if not os.path.isfile(filepath):
+            raise FileNotFoundError(
+                "Downloaded file was not found."
+            )
 
         state.status = "finished"
 
