@@ -1,0 +1,26 @@
+services:
+  - type: worker
+    name: telegram-video-downloader
+    runtime: docker
+
+    dockerfilePath: ./Dockerfile
+
+    dockerCommand: python bot.py
+
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: DOWNLOAD_DIR
+        value: /var/data/downloads
+
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: "1"
+
+      - key: MAX_DISK_USAGE_PERCENT
+        value: "90"
+
+    disk:
+      name: video-storage
+      mountPath: /var/data
+      sizeGB: 20
